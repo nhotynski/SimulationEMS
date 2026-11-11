@@ -1,0 +1,34 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 44c77604ef2e4bb8a93d295142a30c01, type: 3}
+  m_Name: TrolleyType_3m
+  m_EditorClassIdentifier:
+  typeId: TROLLEY-3M
+  displayName: Trolley 3 m
+  bodyLengthMeters: 3
+  wheelbaseMeters: 2.4
+  bodyPrefab: {fileID: 100000, guid: 44c77604ef2e4bb8a93d295142a30c20, type: 3}
+  wheelAssemblyPrefab: {fileID: 100000, guid: 44c77604ef2e4bb8a93d295142a30c21, type: 3}
+  suspensionHeightMeters: 1.1
+  frontWheelAssemblyOffsetMeters: {x: 0, y: 0, z: 0}
+  rearWheelAssemblyOffsetMeters: {x: 0, y: 0, z: 0}
+  frontWheelRotationOffsetDegrees: {x: 0, y: 0, z: 0}
+  rearWheelRotationOffsetDegrees: {x: 0, y: 0, z: 0}
+  barcodeReaderMountingPositionMeters: {x: 0, y: -0.4, z: 0.8}
+  maximumSpeedMetersPerSecond: 1.5
+  accelerationMetersPerSecondSquared: 0.3
+  decelerationMetersPerSecondSquared: 0.5
+  weightKilograms: 250
+  bodyWidthMeters: 0.8
+  bodyHeightMeters: 0.6
+  bodyColor: {r: 0.24, g: 0.42, b: 0.55, a: 1}
+  customParameters: []

@@ -1,0 +1,21 @@
+{
+  "name": "IndustrialConveyor.Tests",
+  "rootNamespace": "IndustrialConveyor.Tests",
+  "references": [
+    "IndustrialConveyor.Simulation"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": false,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "noEngineReferences": false
+}

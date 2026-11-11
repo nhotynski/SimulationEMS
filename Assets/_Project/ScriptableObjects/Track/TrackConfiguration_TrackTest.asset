@@ -1,0 +1,89 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7d9a1e2b3c4d5e6f708192a3b4c5d608, type: 3}
+  m_Name: TrackConfiguration_TrackTest
+  m_EditorClassIdentifier:
+  startPosition: {x: 0, y: 0, z: 0}
+  initialHeadingDegrees: 0
+  targetLengthMeters: 1000
+  requireClosedLoop: 1
+  closurePositionToleranceMeters: 0.01
+  closureHeadingToleranceDegrees: 0.1
+  targetLengthToleranceMeters: 0.1
+  intersectionSampleSpacingMeters: 2
+  segments:
+  - label: North 200 m
+    type: 0
+    straightLengthMeters: 200
+    turnDirection: 1
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: Right 90 deg R5
+    type: 1
+    straightLengthMeters: 10
+    turnDirection: 1
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: East 100 m
+    type: 0
+    straightLengthMeters: 100
+    turnDirection: 1
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: Left 90 deg R5
+    type: 1
+    straightLengthMeters: 10
+    turnDirection: 0
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: North 150 m
+    type: 0
+    straightLengthMeters: 150
+    turnDirection: 1
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: Left 90 deg R5 second
+    type: 1
+    straightLengthMeters: 10
+    turnDirection: 0
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: West 100 m
+    type: 0
+    straightLengthMeters: 100
+    turnDirection: 1
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: Right 90 deg R5 second
+    type: 1
+    straightLengthMeters: 10
+    turnDirection: 1
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: Left U-turn R7.732
+    type: 1
+    straightLengthMeters: 10
+    turnDirection: 0
+    angleDegrees: 180
+    radiusMeters: 7.7323954
+  - label: South 370 m
+    type: 0
+    straightLengthMeters: 370
+    turnDirection: 1
+    angleDegrees: 90
+    radiusMeters: 5
+  - label: Left U-turn R7.732 close
+    type: 1
+    straightLengthMeters: 10
+    turnDirection: 0
+    angleDegrees: 180
+    radiusMeters: 7.7323954

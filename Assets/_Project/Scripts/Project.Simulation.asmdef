@@ -1,0 +1,14 @@
+{
+  "name": "IndustrialConveyor.Simulation",
+  "rootNamespace": "IndustrialConveyor.Simulation",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
