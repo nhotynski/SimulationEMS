@@ -100,3 +100,17 @@ Ostatnia poprawka:
 - Kolejny zrzut po ruchu kamery ujawnił krawędź skończonej podłogi: kamera wyjeżdżała poza margines 30 m i odsłaniała skybox. Margines zmieniono na 2000 m w domyślnej wartości `TrackVisualization` i jawnie w `TrackTestScene`.
 
 Nie wracaj do wyjaśnienia „kamera jest pod torem” bez nowego dowodu. Najpierw sprawdź ortho size, aspect Game View, skybox i rzeczywiste rzutowanie toru.
+
+## Aktualizacja: przyczyna pustego dołu kadru (near clip) - POTWIERDZONE przez użytkownika
+
+Objaw: podłoga wyglądała na ucięta, dół widoku pusty/szary z ostrą krawędzią, niezależnie od rozmiaru podłogi (margines 30 m i 2000 m dawały ten sam efekt).
+
+Przyczyna: kamera jest ortograficzna, wisi ok. 27 m nad ziemią i patrzy w dół pod 45°. W kamerze ortograficznej głębokość liczy się wzdłuż osi patrzenia, więc geometria obok/za pozycją kamery ma ujemną głębokość i była ucinana przez domyślny near clip plane (0.3). Nie był to problem podłogi, pozycji kamery ani skyboxa.
+
+Poprawka (działa, użytkownik potwierdził): near clip plane = -2000, far clip plane = 4000.
+- `TrolleyCameraController.Awake` ustawia `nearClipPlane`/`farClipPlane` kamery ortograficznej.
+- `TrackTestScene` ma te same wartości zapisane w Main Camera.
+
+Wskazówka na przyszłość: przy "znikającej geometrii" w kamerze ortograficznej najpierw sprawdź near/far clip plane, dopiero potem rozmiar obiektów i pozycję kamery. Nie wracaj do hipotezy "kamera pod torem".
+
+Stan Git: projekt wypchnięty/do wypchnięcia do https://github.com/nhotynski/SimulationEMS (gałąź main). Folder `Nowy folder` (lokalny build gry) jest w .gitignore.
