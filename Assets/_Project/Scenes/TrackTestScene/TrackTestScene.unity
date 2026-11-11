@@ -460,6 +460,7 @@ GameObject:
   - component: {fileID: 1600000132}
   - component: {fileID: 1600000133}
   - component: {fileID: 1600000134}
+  - component: {fileID: 1600000135}
   m_Layer: 0
   m_Name: Trolley Simulation Manager
   m_TagString: Untagged

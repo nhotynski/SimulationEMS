@@ -114,3 +114,45 @@ Poprawka (działa, użytkownik potwierdził): near clip plane = -2000, far clip 
 Wskazówka na przyszłość: przy "znikającej geometrii" w kamerze ortograficznej najpierw sprawdź near/far clip plane, dopiero potem rozmiar obiektów i pozycję kamery. Nie wracaj do hipotezy "kamera pod torem".
 
 Stan Git: projekt wypchnięty/do wypchnięcia do https://github.com/nhotynski/SimulationEMS (gałąź main). Folder `Nowy folder` (lokalny build gry) jest w .gitignore.
+
+## Aktualizacja: build gry (Build And Run) - sceny i shadery
+
+1. Build pokazywał domyślną scenę z magentową piłką: w Build Profiles była tylko `SampleScene`. Ustawiono `TrackTestScene` w `ProjectSettings/EditorBuildSettings.asset`.
+2. Build kończył się `Failed` na kroku "Building scenes". Przyczyna: w `TrackTestScene` komponent `TrolleyDiagnosticOverlay` (fileID 1600000135) nie był wpisany w `m_Component` obiektu `Trolley Simulation Manager`. Dopisano go. Build po tej zmianie przechodzi i uruchamia grę (panel DIAGNOSTICS działa w buildzie).
+3. W buildzie nie rysował się tor, podłoga ani wózki (tylko tło kamery i panel IMGUI). Podejrzana przyczyna (NIEPOTWIERDZONA w buildzie): `Shader.Find("Universal Render Pipeline/Lit")` zwraca null w playerze (shader wycięty), więc materiały nie powstawały. `Player.log` (`C:\Users\PLRADHON\AppData\LocalLow\DefaultCompany\My project\Player.log`) nie zawierał wyjątków.
+4. Wpis URP/Lit w `GraphicsSettings.asset` został nadpisany przez otwarte Unity. NIE edytuj plików `ProjectSettings` ręcznie, gdy edytor jest uruchomiony; zmiany zostaną utracone.
+5. Poprawka: `Assets/_Project/Resources/ConveyorLit.mat` (shader URP/Lit, wchodzi do buildu przez Resources) oraz `ConveyorShaders.Lit` (`Scripts/Core/ConveyorShaders.cs`); `TrackVisualization` i `TrolleySuspension` używają jej zamiast `Shader.Find`. Kompilacja Unity i `dotnet build` OK. Do potwierdzenia: nowy Build And Run pokazuje tor, podłogę i wózki. Jeśli nie, następny krok to sprawdzić `Player.log` i przypisać materiał jako zasób w scenie (pole `railMaterial`).
+
+Zasady pracy: po każdej zmianie dopisz ją tutaj i sprawdź `Logs/Editor.log` oraz `Player.log`, czy coś się nie wydarzyło (błędy kompilacji, wyjątki, zmiany plików przez Unity).
+
+## Aktualizacja: pozycje w mm i żywa pozycja w panelu
+
+- `TrolleyClickProbe`: wszystkie pozycje w panelu są teraz w milimetrach (ADD POSITION mm, ACTUAL POS mm, MOVE TO mm); model nadal liczy w metrach (konwersja ×0.001 przy ADD/MOVE).
+- Nowa kolumna `ACTUAL POS mm` to etykieta tylko do odczytu, odświeżana co klatkę z `TrolleyData.SimulationPositionMeters`. Wcześniej jedna edytowalna kolumna była wypełniana raz i trzymała stare wartości (stąd "pozycja się nie aktualizuje").
+- `MOVE TO mm` + `MOVE` przenosi zawieszkę (`MoveTrolleyToPosition`); pole nie jest nadpisywane w trakcie pisania.
+- `dotnet build`: 0 błędów. Po edycji `Library/ScriptAssemblies` miało jeszcze starszy timestamp niż plik (Unity nie przekompilowało jeszcze). Niezweryfikowane w Play/buildzie.
+
+## Aktualizacja: wysyłanie pozycji zawieszek po UDP (okno UDP CONFIG)
+
+Nowe pliki: `Scripts/Communication/PositionTelegram.cs`, `Scripts/Communication/UdpPositionSender.cs`, test `Tests/Editor/PositionTelegramTests.cs`. Zmieniony: `HMI/TrolleyClickProbe.cs` (przycisk `UDP CONFIG [+]` na lewo od `DIAGNOSTICS`, osobne przesuwalne okno). `UdpPositionSender` dodaje się do obiektu managera w runtime (nic nie zmieniono w scenie).
+
+Telegram (little-endian, stały rozmiar 1224 B = nagłówek 24 B + 100 rekordów x 12 B; nieużywane rekordy wyzerowane):
+- Nagłówek: magic `CNVP` u32 (0x50564E43), wersja u16 (=1), liczba aktywnych rekordów u16, numer pakietu u32 (rośnie z każdym wysłanym pakietem), czas symulacji ms u32, długość toru mm u32, rozmiar rekordu u16 (=12), maks. rekordów u16 (=100).
+- Rekord: id u16 (cyfry z `T-001`), typ u8 (długość korpusu w dm: 30/50/70), stan napędu u8 (`TrolleyDriveState`: 0 Ready, 1 Running, 2 Stopped, 3 EmergencyStopped, 4 Faulted), pozycja mm u32, prędkość mm/s i32.
+
+Okno `UDP CONFIG`: wybór karty sieciowej (lista adresów IPv4 aktywnych kart + `Any`) wpisuje IP symulacji; pola `SIMULATION IP` (adres lokalny, do którego bindowane jest gniazdo, więc to wybiera kartę), `DESTINATION IP`, `DESTINATION PORT`, `INTERVAL ms` (10-2000); `START`/`RESTART`/`STOP`; licznik wysłanych pakietów i ostatni błąd. Ustawienia zapisują się w PlayerPrefs po START.
+
+Implementacja: telegram jest odświeżany co klatkę w `Update` (na wątku głównym), a osobny wątek tła wysyła ostatni snapshot co zadany interwał (`Stopwatch` + `timeBeginPeriod(1)` na Windows, żeby 10 ms było osiągalne). Pozycje są więc tak świeże jak klatka symulacji; przy bardzo niskim FPS dane w pakietach się powtarzają.
+
+Status: kod kompiluje się (kompilacja Simulation z nowymi plikami: 0 błędów; `dotnet build` Editor pokazuje stare błędy do czasu aż Unity przegeneruje csproj). NIE przetestowano w Unity ani przez rzeczywisty odbiór pakietów. Do zrobienia: otworzyć UDP CONFIG, START na `127.0.0.1:5000` i odebrać pakiet (np. prosty listener Python), uruchomić testy EditMode `PositionTelegramTests`.
+
+Test na tym samym komputerze: DESTINATION IP `127.0.0.1`, port np. `5000`, odbiornik Python (`socket.SOCK_DGRAM`, `bind(("0.0.0.0", 5000))`, `struct.unpack_from("<IHHIIIHH", data, 0)` dla nagłówka i `"<HBBIi"` od offsetu `24 + i*12` dla rekordów) uruchomiony przed START. Adres źródłowy (SIMULATION IP) i docelowy muszą być z tej samej "strony": oba loopback albo oba LAN. Plik skryptu trzymaj poza `Assets`.
+
+- UDP: błąd 'Żądany adres jest nieprawidłowy w tym kontekście' (WSAEADDRNOTAVAIL) wystąpił przy DESTINATION IP 0.0.0.0 oraz przy źródle na karcie LAN/Wi-Fi z celem 127.x. `UdpPositionSender.Begin` odrzuca teraz cel 0.0.0.0 i niezgodność loopback/sieć z czytelnym komunikatem. Na jednym komputerze: SIMULATION IP 0.0.0.0 lub 127.0.0.1, DESTINATION IP 127.0.0.1 (nie 127.0.0.0).
+
+## Stan na koniec sesji (2026-11-11)
+
+- Wireshark: UDP na ten sam komputer (DESTINATION IP `127.0.0.1`) łap interfejsem `Adapter for loopback traffic capture` (Npcap, typ BSD loopback), filtr `udp.port == 5000`. Do innego komputera: interfejs, którym wychodzi ruch (np. Wi-Fi). PuTTY nie odbiera UDP.
+- Niezweryfikowane w Unity/buildzie: widoczność toru/podłogi/wózków w buildzie po zmianie na `ConveyorShaders`, kolumna `ACTUAL POS mm` i `MOVE TO mm`, faktyczna wysyłka UDP i odbiór pakietów, testy EditMode (`PositionTelegramTests`, testy ruchu).
+- Git: zdalne repo `https://github.com/nhotynski/SimulationEMS.git` (`origin`, gałąź `main`). Wypchnięty jest tylko pierwszy commit i notatka near-clip; zmiany z buildu, panelu w mm i UDP są lokalne, niezacommitowane. Nie amenduj wypchniętych commitów.
+- Pierwszy krok następnej sesji: otworzyć Unity, sprawdzić Console, zrobić Build And Run (scena `TrackTestScene`) i sprawdzić `Player.log`.

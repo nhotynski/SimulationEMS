@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using IndustrialConveyor.Simulation.Communication;
 using IndustrialConveyor.Simulation.Movement;
 using UnityEngine;
 
@@ -10,6 +11,7 @@ namespace IndustrialConveyor.Simulation.HMI
     public sealed class TrolleyClickProbe : MonoBehaviour
     {
         private const int WindowId = 638214;
+        private const int UdpWindowId = 638215;
         private readonly Dictionary<string, string> targetInputs = new Dictionary<string, string>();
         private readonly Dictionary<string, string> positionInputs = new Dictionary<string, string>();
 
@@ -22,6 +24,17 @@ namespace IndustrialConveyor.Simulation.HMI
         private string panelMessage;
         private Vector2 scrollPosition;
         private Rect windowRect;
+        private UdpPositionSender udpSender;
+        private UdpSettings udpSettings;
+        private List<NetworkAdapterInfo> udpAdapters;
+        private bool udpExpanded;
+        private Rect udpWindowRect;
+        private Vector2 udpAdapterScroll;
+        private string udpLocalIpInput;
+        private string udpDestinationIpInput;
+        private string udpPortInput;
+        private string udpIntervalInput;
+        private string udpError;
         private GUIStyle windowStyle;
         private GUIStyle rowStyle;
         private GUIStyle headingStyle;
@@ -43,7 +56,18 @@ namespace IndustrialConveyor.Simulation.HMI
             {
                 Debug.LogError($"{nameof(TrolleyClickProbe)} requires {nameof(TrolleySimulationManager)} on the same GameObject.", this);
                 enabled = false;
+                return;
             }
+
+            udpSender = GetComponent<UdpPositionSender>();
+            if (udpSender == null)
+                udpSender = gameObject.AddComponent<UdpPositionSender>();
+            udpSettings = UdpSettings.Load();
+            udpLocalIpInput = udpSettings.LocalIp;
+            udpDestinationIpInput = udpSettings.DestinationIp;
+            udpPortInput = udpSettings.DestinationPort.ToString(CultureInfo.InvariantCulture);
+            udpIntervalInput = udpSettings.IntervalMs.ToString(CultureInfo.InvariantCulture);
+            udpAdapters = NetworkAdapters.ListIPv4();
         }
 
         private void OnGUI()
@@ -60,6 +84,20 @@ namespace IndustrialConveyor.Simulation.HMI
 
             if (topRightClicked)
                 ToggleDiagnostics();
+
+            GUI.color = new Color(0.08f, 0.72f, 0.76f, 1f);
+            var udpClicked = GUI.Button(new Rect(Screen.width - 396f, 12f, 186f, 36f),
+                udpExpanded ? "UDP CONFIG  [ - ]" : "UDP CONFIG  [ + ]", buttonStyle);
+            GUI.color = previousColor;
+            if (udpClicked)
+                udpExpanded = !udpExpanded;
+            if (udpExpanded)
+            {
+                if (udpWindowRect.width <= 0f)
+                    udpWindowRect = new Rect(12f, 56f, Mathf.Min(560f, Screen.width - 24f),
+                        Mathf.Min(470f, Screen.height - 64f));
+                udpWindowRect = GUI.Window(UdpWindowId, udpWindowRect, DrawUdpWindow, GUIContent.none, windowStyle);
+            }
 
             if (!expanded)
                 return;
@@ -105,10 +143,11 @@ namespace IndustrialConveyor.Simulation.HMI
             GUILayout.Space(6f);
 
             GUILayout.BeginHorizontal();
-            Header("ID", 62f);
-            Header("TYPE", 96f);
-            Header("POSITION m", 112f);
-            Header("", 60f);
+            Header("ID", 50f);
+            Header("TYPE", 90f);
+            Header("ACTUAL POS mm", 104f);
+            Header("MOVE TO mm", 104f);
+            Header("", 56f);
             Header("ACTUAL mm/s", 82f);
             Header("TARGET mm/s", 90f);
             Header("", 44f);
@@ -125,6 +164,105 @@ namespace IndustrialConveyor.Simulation.HMI
             GUILayout.EndScrollView();
 
             GUI.DragWindow(new Rect(0f, 0f, windowRect.width - 100f, 24f));
+        }
+
+        private void DrawUdpWindow(int id)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("UDP CONFIG", headingStyle);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("COLLAPSE", buttonStyle, GUILayout.Width(82f), GUILayout.Height(28f)))
+                udpExpanded = false;
+            GUILayout.EndHorizontal();
+
+            GUILayout.Label(udpSender.IsRunning
+                ? $"RUNNING  |  {udpSender.PacketsSent} packets sent"
+                : "STOPPED", statusStyle);
+            if (!string.IsNullOrEmpty(udpSender.LastError))
+                GUILayout.Label("Send error: " + udpSender.LastError, errorStyle);
+            if (!string.IsNullOrEmpty(udpError))
+                GUILayout.Label(udpError, errorStyle);
+            GUILayout.Space(6f);
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("NETWORK ADAPTER", headingStyle);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("REFRESH", buttonStyle, GUILayout.Width(82f), GUILayout.Height(24f)))
+                udpAdapters = NetworkAdapters.ListIPv4();
+            GUILayout.EndHorizontal();
+            udpAdapterScroll = GUILayout.BeginScrollView(udpAdapterScroll, GUILayout.Height(110f));
+            foreach (var adapter in udpAdapters)
+            {
+                if (GUILayout.Button(adapter.Label, buttonStyle, GUILayout.Height(24f)))
+                    udpLocalIpInput = adapter.Address;
+            }
+            GUILayout.EndScrollView();
+            GUILayout.Space(6f);
+
+            DrawUdpField("SIMULATION IP", ref udpLocalIpInput);
+            DrawUdpField("DESTINATION IP", ref udpDestinationIpInput);
+            DrawUdpField("DESTINATION PORT", ref udpPortInput);
+            DrawUdpField($"INTERVAL ms ({UdpPositionSender.MinimumIntervalMs}-{UdpPositionSender.MaximumIntervalMs})",
+                ref udpIntervalInput);
+            GUILayout.Space(6f);
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(udpSender.IsRunning ? "RESTART" : "START", buttonStyle, GUILayout.Width(110f), GUILayout.Height(30f)))
+                StartUdp();
+            if (GUILayout.Button("STOP", buttonStyle, GUILayout.Width(110f), GUILayout.Height(30f)))
+            {
+                udpSender.Stop();
+                udpError = null;
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Space(6f);
+
+            GUILayout.Label($"Telegram: {PositionTelegram.TotalSize} B = {PositionTelegram.HeaderSize} B header + " +
+                            $"{PositionTelegram.MaximumRecords} x {PositionTelegram.RecordSize} B records (little-endian).", statusStyle);
+            GUILayout.Label("Record: id u16, type u8, drive u8, position mm u32, speed mm/s i32.", statusStyle);
+
+            GUI.DragWindow(new Rect(0f, 0f, udpWindowRect.width - 100f, 24f));
+        }
+
+        private void DrawUdpField(string label, ref string value)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, statusStyle, GUILayout.Width(190f));
+            value = GUILayout.TextField(value ?? string.Empty, fieldStyle, GUILayout.Width(220f));
+            GUILayout.EndHorizontal();
+        }
+
+        private void StartUdp()
+        {
+            if (!int.TryParse(udpPortInput, NumberStyles.Integer, CultureInfo.InvariantCulture, out var port))
+            {
+                udpError = "Port must be a whole number.";
+                return;
+            }
+            if (!int.TryParse(udpIntervalInput, NumberStyles.Integer, CultureInfo.InvariantCulture, out var interval))
+            {
+                udpError = "Interval must be a whole number of milliseconds.";
+                return;
+            }
+
+            var settings = new UdpSettings
+            {
+                LocalIp = udpLocalIpInput.Trim(),
+                DestinationIp = udpDestinationIpInput.Trim(),
+                DestinationPort = port,
+                IntervalMs = interval
+            };
+            try
+            {
+                udpSender.Begin(settings);
+                settings.Save();
+                udpSettings = settings;
+                udpError = null;
+            }
+            catch (Exception exception)
+            {
+                udpError = exception.Message;
+            }
         }
 
         private void DrawAddControls()
@@ -149,7 +287,7 @@ namespace IndustrialConveyor.Simulation.HMI
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("POSITION m", statusStyle, GUILayout.Width(112f));
+            GUILayout.Label("POSITION mm", statusStyle, GUILayout.Width(112f));
             if ((string.IsNullOrEmpty(addPositionInput) || selectedTypeIndex != previousTypeIndex) &&
                 availableTypes[selectedTypeIndex] != null)
                 RefreshSuggestedPosition(availableTypes[selectedTypeIndex]);
@@ -163,8 +301,8 @@ namespace IndustrialConveyor.Simulation.HMI
         {
             try
             {
-                addPositionInput = simulationManager.GetSuggestedTrolleyPositionMeters(trolleyType)
-                    .ToString("F2", CultureInfo.InvariantCulture);
+                addPositionInput = (simulationManager.GetSuggestedTrolleyPositionMeters(trolleyType) * 1000f)
+                    .ToString("F0", CultureInfo.InvariantCulture);
                 panelError = null;
             }
             catch (Exception exception)
@@ -178,19 +316,19 @@ namespace IndustrialConveyor.Simulation.HMI
         {
             GUILayout.BeginVertical(rowStyle);
             GUILayout.BeginHorizontal();
-            GUILayout.Label(trolley.TrolleyId, labelStyle, GUILayout.Width(62f));
-            GUILayout.Label(trolley.TrolleyType.DisplayName, labelStyle, GUILayout.Width(96f));
+            GUILayout.Label(trolley.TrolleyId, labelStyle, GUILayout.Width(50f));
+            GUILayout.Label(trolley.TrolleyType.DisplayName, labelStyle, GUILayout.Width(90f));
+            GUILayout.Label($"{trolley.SimulationPositionMeters * 1000f:F0}", labelStyle, GUILayout.Width(104f));
             if (!positionInputs.TryGetValue(trolley.TrolleyId, out var positionInput))
-                positionInput = trolley.SimulationPositionMeters.ToString("F2", CultureInfo.InvariantCulture);
-            positionInputs[trolley.TrolleyId] = GUILayout.TextField(positionInput, fieldStyle, GUILayout.Width(112f));
-            if (GUILayout.Button("MOVE", buttonStyle, GUILayout.Width(60f)))
+                positionInput = (trolley.SimulationPositionMeters * 1000f).ToString("F0", CultureInfo.InvariantCulture);
+            positionInputs[trolley.TrolleyId] = GUILayout.TextField(positionInput, fieldStyle, GUILayout.Width(104f));
+            if (GUILayout.Button("MOVE", buttonStyle, GUILayout.Width(56f)))
             {
-                if (TryParseFloat(positionInputs[trolley.TrolleyId], out var position))
+                if (TryParseFloat(positionInputs[trolley.TrolleyId], out var positionMillimeters))
                 {
                     try
                     {
-                        simulationManager.MoveTrolleyToPosition(trolley.TrolleyId, position);
-                        positionInputs[trolley.TrolleyId] = trolley.SimulationPositionMeters.ToString("F2", CultureInfo.InvariantCulture);
+                        simulationManager.MoveTrolleyToPosition(trolley.TrolleyId, positionMillimeters * 0.001f);
                         panelError = null;
                     }
                     catch (Exception exception)
@@ -200,7 +338,7 @@ namespace IndustrialConveyor.Simulation.HMI
                 }
                 else
                 {
-                    panelError = "Enter a valid position in meters.";
+                    panelError = "Enter a valid position in millimeters.";
                 }
                 GUILayout.EndHorizontal();
                 GUILayout.EndVertical();
@@ -264,22 +402,23 @@ namespace IndustrialConveyor.Simulation.HMI
                 panelError = "Select a valid trolley type.";
                 return;
             }
-            if (!TryParseFloat(addPositionInput, out var position))
+            if (!TryParseFloat(addPositionInput, out var positionMillimeters))
             {
-                panelError = "Enter a valid position in meters.";
+                panelError = "Enter a valid position in millimeters.";
                 return;
             }
 
             try
             {
-                var trolley = simulationManager.AddTrolley(trolleyType, position);
-                positionInputs[trolley.TrolleyId] = trolley.SimulationPositionMeters.ToString("F2", CultureInfo.InvariantCulture);
+                var trolley = simulationManager.AddTrolley(trolleyType, positionMillimeters * 0.001f);
+                positionInputs[trolley.TrolleyId] = (trolley.SimulationPositionMeters * 1000f)
+                    .ToString("F0", CultureInfo.InvariantCulture);
                 targetInputs[trolley.TrolleyId] = (trolley.TargetSpeedMetersPerSecond * 1000f)
                     .ToString("F0", CultureInfo.InvariantCulture);
-                addPositionInput = simulationManager.GetSuggestedTrolleyPositionMeters(trolleyType)
-                    .ToString("F2", CultureInfo.InvariantCulture);
+                addPositionInput = (simulationManager.GetSuggestedTrolleyPositionMeters(trolleyType) * 1000f)
+                    .ToString("F0", CultureInfo.InvariantCulture);
                 scrollPosition.y = float.MaxValue;
-                panelMessage = $"Added {trolley.TrolleyId} ({trolley.TrolleyType.DisplayName}) at {trolley.SimulationPositionMeters:F2} m.";
+                panelMessage = $"Added {trolley.TrolleyId} ({trolley.TrolleyType.DisplayName}) at {trolley.SimulationPositionMeters * 1000f:F0} mm.";
                 panelError = null;
                 Debug.Log(panelMessage, this);
             }

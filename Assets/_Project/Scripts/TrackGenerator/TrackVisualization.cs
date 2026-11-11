@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using IndustrialConveyor.Simulation.Core;
 using IndustrialConveyor.Simulation.Track;
 using UnityEngine;
 
@@ -247,8 +248,7 @@ namespace IndustrialConveyor.Simulation.TrackGenerator
 
         private void CreateMaterials()
         {
-            var shader = railMaterial != null ? railMaterial.shader :
-                Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+            var shader = railMaterial != null ? railMaterial.shader : ConveyorShaders.Lit;
             if (shader == null)
                 return;
 

@@ -1,4 +1,5 @@
 using System;
+using IndustrialConveyor.Simulation.Core;
 using IndustrialConveyor.Simulation.Track;
 using IndustrialConveyor.Simulation.TrolleyTypes;
 using UnityEngine;
@@ -224,7 +225,7 @@ namespace IndustrialConveyor.Simulation.Suspension
         {
             if (sharedMaterial == null)
             {
-                var shader = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard");
+                var shader = ConveyorShaders.Lit;
                 if (shader == null)
                     return;
                 sharedMaterial = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
