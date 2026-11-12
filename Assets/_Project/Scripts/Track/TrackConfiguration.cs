@@ -43,5 +43,25 @@ namespace IndustrialConveyor.Simulation.Track
 
         /// <summary>Gets the ordered segment definitions.</summary>
         public IReadOnlyList<TrackSegmentDefinition> Segments => segments;
+
+        /// <summary>Creates a runtime-only configuration, for example from an external track file.</summary>
+        public static TrackConfiguration Create(Vector3 startPosition, float initialHeadingDegrees, float targetLengthMeters,
+            bool requireClosedLoop, float closurePositionToleranceMeters, float closureHeadingToleranceDegrees,
+            float targetLengthToleranceMeters, float intersectionSampleSpacingMeters,
+            IEnumerable<TrackSegmentDefinition> segmentDefinitions)
+        {
+            var configuration = CreateInstance<TrackConfiguration>();
+            configuration.hideFlags = HideFlags.DontSave;
+            configuration.startPosition = startPosition;
+            configuration.initialHeadingDegrees = initialHeadingDegrees;
+            configuration.targetLengthMeters = targetLengthMeters;
+            configuration.requireClosedLoop = requireClosedLoop;
+            configuration.closurePositionToleranceMeters = closurePositionToleranceMeters;
+            configuration.closureHeadingToleranceDegrees = closureHeadingToleranceDegrees;
+            configuration.targetLengthToleranceMeters = targetLengthToleranceMeters;
+            configuration.intersectionSampleSpacingMeters = intersectionSampleSpacingMeters;
+            configuration.segments = new List<TrackSegmentDefinition>(segmentDefinitions);
+            return configuration;
+        }
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using IndustrialConveyor.Simulation.Core;
 using IndustrialConveyor.Simulation.Track;
 using IndustrialConveyor.Simulation.TrolleyTypes;
@@ -20,7 +21,7 @@ namespace IndustrialConveyor.Simulation.Suspension
         [SerializeField] private Vector3 bodyRotationOffsetDegrees;
         [SerializeField, Min(0f)] private float initialCenterPositionMeters;
 
-        private TrackPath trackPath;
+        private TrackNetwork network;
         private GameObject bodyInstance;
         private GameObject frontWheelInstance;
         private GameObject rearWheelInstance;
@@ -49,8 +50,11 @@ namespace IndustrialConveyor.Simulation.Suspension
         /// <summary>Gets the last world-space body rotation derived from both wheel positions.</summary>
         public Quaternion BodyRotation { get; private set; }
 
-        /// <summary>Gets the mathematical path used by the suspension.</summary>
-        public TrackPath TrackPath => trackPath;
+        /// <summary>Gets the geometry of the main track edge (the whole loop on a simple loop).</summary>
+        public TrackPath TrackPath => network != null ? network.Edges[0].Path : null;
+
+        /// <summary>Gets the track network the suspension samples.</summary>
+        public TrackNetwork Network => network;
 
         /// <summary>Gets the configured starting center position in meters along the track.</summary>
         public float InitialCenterPositionMeters => initialCenterPositionMeters;
@@ -63,7 +67,7 @@ namespace IndustrialConveyor.Simulation.Suspension
             Initialize();
         }
 
-        /// <summary>Validates references, builds the immutable path, and creates the configured visuals.</summary>
+        /// <summary>Validates references, resolves the track network, and creates the configured visuals.</summary>
         public void Initialize()
         {
             if (trackConfiguration == null)
@@ -75,12 +79,7 @@ namespace IndustrialConveyor.Simulation.Suspension
             if (bodyAnchor == null || frontWheelAssemblyAnchor == null || rearWheelAssemblyAnchor == null)
                 throw new InvalidOperationException($"{nameof(TrolleySuspension)} on '{name}' requires body, front-wheel, and rear-wheel anchors.");
 
-            var result = TrackGeometryBuilder.Build(trackConfiguration);
-            if (!result.Report.IsValid || !result.Path.IsClosed)
-                throw new InvalidOperationException(
-                    $"Trolley suspension requires a valid closed track: {string.Join("; ", GetErrors(result.Report))}");
-
-            trackPath = result.Path;
+            network = TrackSource.ResolveNetwork(trackConfiguration);
             CreateVisualInstances();
             UpdateSuspension(initialCenterPositionMeters);
         }
@@ -92,7 +91,7 @@ namespace IndustrialConveyor.Simulation.Suspension
                 throw new ArgumentOutOfRangeException(nameof(distanceMeters), "Trolley center position must be finite.");
 
             initialCenterPositionMeters = distanceMeters;
-            if (trackPath != null)
+            if (network != null)
                 UpdateSuspension(initialCenterPositionMeters);
         }
 
@@ -114,7 +113,7 @@ namespace IndustrialConveyor.Simulation.Suspension
             rearWheelInstance = null;
             trolleyType = newType;
 
-            if (trackPath != null)
+            if (network != null)
             {
                 CreateVisualInstances();
                 UpdateSuspension(initialCenterPositionMeters);
@@ -122,18 +121,41 @@ namespace IndustrialConveyor.Simulation.Suspension
         }
 
         /// <summary>
-        /// Independently samples the front and rear wheel positions around the trolley center, then aligns the body to both.
+        /// Places the trolley at a distance along the main route (the whole loop on a simple loop), sampling both wheels
+        /// independently around the center and aligning the body to them.
         /// </summary>
         public void UpdateSuspension(float trolleyCenterPosition)
         {
-            if (trackPath == null)
+            if (network == null)
                 Initialize();
             if (float.IsNaN(trolleyCenterPosition) || float.IsInfinity(trolleyCenterPosition))
                 throw new ArgumentOutOfRangeException(nameof(trolleyCenterPosition), "Trolley center position must be finite.");
 
+            var location = network.ResolveMainRoute(trolleyCenterPosition);
+            UpdateSuspension(location.Edge, location.Meters, null);
+        }
+
+        /// <summary>
+        /// Places the trolley at a point of a track edge. The front wheel follows the active switches ahead; the rear wheel
+        /// follows the edges the trolley has actually travelled (<paramref name="trail"/>, most recent first).
+        /// </summary>
+        public void UpdateSuspension(TrackEdge edge, float edgeMeters, IReadOnlyList<TrackEdge> trail)
+        {
+            if (network == null)
+                Initialize();
+            if (edge == null)
+                throw new ArgumentNullException(nameof(edge));
+            if (float.IsNaN(edgeMeters) || float.IsInfinity(edgeMeters))
+                throw new ArgumentOutOfRangeException(nameof(edgeMeters), "Trolley center position must be finite.");
+
             var halfWheelbase = trolleyType.WheelbaseMeters * 0.5f;
-            var frontSample = SampleAt(trolleyCenterPosition + halfWheelbase);
-            var rearSample = SampleAt(trolleyCenterPosition - halfWheelbase);
+            var frontSample = network.SampleOffset(edge, edgeMeters, halfWheelbase, trail);
+            var rearSample = network.SampleOffset(edge, edgeMeters, -halfWheelbase, trail);
+            ApplySamples(frontSample, rearSample);
+        }
+
+        private void ApplySamples(TrackSample frontSample, TrackSample rearSample)
+        {
             var frame = trackFrame != null ? trackFrame : transform;
 
             FrontWheelPosition = ToWorldPosition(frame, frontSample, trolleyType.FrontWheelAssemblyOffsetMeters);
@@ -154,11 +176,6 @@ namespace IndustrialConveyor.Simulation.Suspension
             BodyPosition = (FrontWheelPosition + RearWheelPosition) * 0.5f - bodyUp * trolleyType.SuspensionHeightMeters;
             BodyRotation = Quaternion.LookRotation(bodyForward, bodyUp) * Quaternion.Euler(bodyRotationOffsetDegrees);
             ApplyVisualTransforms();
-        }
-
-        private TrackSample SampleAt(float distanceMeters)
-        {
-            return trackPath.SampleAtDistance(distanceMeters, wrapDistance: true);
         }
 
         private Vector3 ToWorldPosition(Transform frame, TrackSample sample, Vector3 localOffset)
@@ -244,17 +261,6 @@ namespace IndustrialConveyor.Simulation.Suspension
                     bodyMaterialProperties.SetColor("_Color", color);
                 renderer.SetPropertyBlock(bodyMaterialProperties);
             }
-        }
-
-        private static string[] GetErrors(TrackValidationReport report)
-        {
-            var messages = new System.Collections.Generic.List<string>();
-            foreach (var issue in report.Issues)
-            {
-                if (issue.Severity == TrackIssueSeverity.Error)
-                    messages.Add(issue.Message);
-            }
-            return messages.ToArray();
         }
     }
 }

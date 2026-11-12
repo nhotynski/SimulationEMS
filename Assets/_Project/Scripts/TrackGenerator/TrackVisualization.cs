@@ -33,8 +33,8 @@ namespace IndustrialConveyor.Simulation.TrackGenerator
         /// <summary>Gets the assigned source-of-truth track definition.</summary>
         public TrackConfiguration Configuration => configuration;
 
-        /// <summary>Gets the latest calculated path and diagnostics.</summary>
-        public TrackBuildResult BuildResult { get; private set; }
+        /// <summary>Gets the track network the mesh was built from (null when nothing can be drawn).</summary>
+        public TrackNetwork Network { get; private set; }
 
         private void OnEnable()
         {
@@ -56,13 +56,10 @@ namespace IndustrialConveyor.Simulation.TrackGenerator
         public void Rebuild()
         {
             DestroyGeneratedAssets();
-            if (configuration == null)
-            {
-                BuildResult = null;
+            Network = TrackSource.ResolveNetwork(configuration, requireValidLoop: false);
+            if (Network == null)
                 return;
-            }
 
-            BuildResult = TrackGeometryBuilder.Build(configuration);
             generatedMesh = BuildMesh();
             GetComponent<MeshFilter>().sharedMesh = generatedMesh;
 
@@ -77,22 +74,24 @@ namespace IndustrialConveyor.Simulation.TrackGenerator
             var railTriangles = new List<int>();
             var supportTriangles = new List<int>();
             var floorTriangles = new List<int>();
-            var renderablePath = BuildResult.Path;
 
-            foreach (var segment in renderablePath.Segments)
+            foreach (var edge in Network.Edges)
             {
-                var steps = Mathf.Max(1, Mathf.CeilToInt(segment.LengthMeters / Mathf.Max(0.1f, railSampleSpacingMeters)));
-                var previous = segment.SampleAt(0f);
-                for (var step = 1; step <= steps; step++)
+                var renderablePath = edge.Path;
+                foreach (var segment in renderablePath.Segments)
                 {
-                    var current = segment.SampleAt(segment.LengthMeters * step / steps);
-                    AddRailSection(previous, current, vertices, railTriangles);
-                    previous = current;
+                    var steps = Mathf.Max(1, Mathf.CeilToInt(segment.LengthMeters / Mathf.Max(0.1f, railSampleSpacingMeters)));
+                    var previous = segment.SampleAt(0f);
+                    for (var step = 1; step <= steps; step++)
+                    {
+                        var current = segment.SampleAt(segment.LengthMeters * step / steps);
+                        AddRailSection(previous, current, vertices, railTriangles);
+                        previous = current;
+                    }
                 }
-            }
 
-            if (renderablePath.TotalLengthMeters > 0f)
-            {
+                if (renderablePath.TotalLengthMeters <= 0f)
+                    continue;
                 var supportCount = Mathf.FloorToInt(renderablePath.TotalLengthMeters / Mathf.Max(0.1f, supportSpacingMeters));
                 for (var i = 0; i <= supportCount; i++)
                 {
@@ -103,7 +102,7 @@ namespace IndustrialConveyor.Simulation.TrackGenerator
                     AddSupport(renderablePath.SampleAtDistance(renderablePath.TotalLengthMeters), vertices, supportTriangles);
             }
 
-            AddFloor(renderablePath, vertices, floorTriangles);
+            AddFloor(Network, vertices, floorTriangles);
 
             var mesh = new Mesh { name = "Generated Overhead Track", hideFlags = HideFlags.DontSave };
             mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
@@ -121,30 +120,15 @@ namespace IndustrialConveyor.Simulation.TrackGenerator
             return mesh;
         }
 
-        private void AddFloor(TrackPath path, List<Vector3> vertices, List<int> triangles)
+        private void AddFloor(TrackNetwork network, List<Vector3> vertices, List<int> triangles)
         {
-            if (path.TotalLengthMeters <= 0f)
+            if (network.TotalLengthMeters <= 0f)
                 return;
 
-            var minimumX = float.PositiveInfinity;
-            var maximumX = float.NegativeInfinity;
-            var minimumZ = float.PositiveInfinity;
-            var maximumZ = float.NegativeInfinity;
-            var sampleCount = Mathf.Max(1, Mathf.CeilToInt(path.TotalLengthMeters / 5f));
-            for (var index = 0; index <= sampleCount; index++)
-            {
-                var distance = path.TotalLengthMeters * index / sampleCount;
-                var position = path.SampleAtDistance(distance).Position;
-                minimumX = Mathf.Min(minimumX, position.x);
-                maximumX = Mathf.Max(maximumX, position.x);
-                minimumZ = Mathf.Min(minimumZ, position.z);
-                maximumZ = Mathf.Max(maximumZ, position.z);
-            }
-
-            minimumX -= floorMarginMeters;
-            maximumX += floorMarginMeters;
-            minimumZ -= floorMarginMeters;
-            maximumZ += floorMarginMeters;
+            var minimumX = network.BoundsMinimum.x - floorMarginMeters;
+            var maximumX = network.BoundsMaximum.x + floorMarginMeters;
+            var minimumZ = network.BoundsMinimum.z - floorMarginMeters;
+            var maximumZ = network.BoundsMaximum.z + floorMarginMeters;
 
             var firstVertex = vertices.Count;
             const float floorHeight = -0.05f;

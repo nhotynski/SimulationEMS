@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading;
 using IndustrialConveyor.Simulation.Movement;
+using IndustrialConveyor.Simulation.Track;
 using UnityEngine;
 
 namespace IndustrialConveyor.Simulation.Communication
@@ -99,6 +100,7 @@ namespace IndustrialConveyor.Simulation.Communication
         private volatile bool running;
         private volatile string lastError;
         private bool hasData;
+        private List<TrackNode> switches;
         private long packetsSent;
 
         public bool IsRunning => running;
@@ -123,13 +125,15 @@ namespace IndustrialConveyor.Simulation.Communication
             if (!running || simulationManager == null)
                 return;
 
-            var trackLengthMm = simulationManager.TrackPath != null
-                ? (uint)Mathf.Max(0, Mathf.RoundToInt(simulationManager.TrackPath.TotalLengthMeters * 1000f))
+            var trackLengthMm = simulationManager.Network != null
+                ? (uint)Mathf.Max(0, Mathf.RoundToInt(simulationManager.Network.TotalLengthMeters * 1000f))
                 : 0u;
             var simulationTimeMs = (uint)Mathf.Max(0, Mathf.RoundToInt(simulationManager.SimulationTimeSeconds * 1000f));
+            if (switches == null)
+                switches = new List<TrackNode>(simulationManager.GetSwitches());
             lock (gate)
             {
-                PositionTelegram.Write(latest, simulationTimeMs, trackLengthMm, simulationManager.Trolleys);
+                PositionTelegram.Write(latest, simulationTimeMs, trackLengthMm, simulationManager.Trolleys, switches);
                 hasData = true;
             }
         }

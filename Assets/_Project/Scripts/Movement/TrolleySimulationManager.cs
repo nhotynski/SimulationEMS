@@ -26,15 +26,14 @@ namespace IndustrialConveyor.Simulation.Movement
 
         private readonly List<TrolleyData> trolleys = new List<TrolleyData>();
         private readonly List<TrolleySuspension> suspensionPool = new List<TrolleySuspension>();
-        private TrackPath trackPath;
-        private float[] nextPositions;
-        private float[] nextSpeeds;
+        private TrackNetwork network;
+        private TrolleyTraffic traffic;
         private float accumulatorSeconds;
         private bool initialized;
         private bool globalEmergencyStop;
         private bool hasResolvedAvailableTypes;
 
-        /// <summary>Gets the runtime trolley states in current track order.</summary>
+        /// <summary>Gets the runtime trolley states in track order (by edge, then position).</summary>
         public IReadOnlyList<TrolleyData> Trolleys => trolleys;
 
         /// <summary>Gets the simulated elapsed time in seconds.</summary>
@@ -43,8 +42,14 @@ namespace IndustrialConveyor.Simulation.Movement
         /// <summary>Gets whether simulation time is paused.</summary>
         public bool IsPaused { get; private set; }
 
-        /// <summary>Gets the mathematical path shared by the trolley drives.</summary>
-        public TrackPath TrackPath => trackPath;
+        /// <summary>Gets the geometry of the main track edge (the whole loop on a simple loop).</summary>
+        public TrackPath TrackPath => network != null ? network.Edges[0].Path : null;
+
+        /// <summary>Gets the track network shared by the trolley drives.</summary>
+        public TrackNetwork Network => network;
+
+        /// <summary>Gets the traffic logic (spacing, switches, merges).</summary>
+        public TrolleyTraffic Traffic => traffic;
 
         /// <summary>Gets the trolley types available to add from the diagnostics panel.</summary>
         public IReadOnlyList<TrolleyTypeDefinition> AvailableTrolleyTypes
@@ -134,7 +139,7 @@ namespace IndustrialConveyor.Simulation.Movement
                 return;
 
             foreach (var trolley in trolleys)
-                trolley.Suspension.UpdateSuspension(trolley.SimulationPositionMeters);
+                trolley.Suspension.UpdateSuspension(trolley.Edge, trolley.SimulationPositionMeters, trolley.Trail);
         }
 
         /// <summary>Discovers scene trolleys, validates spacing, and initializes one state per independent drive.</summary>
@@ -152,11 +157,10 @@ namespace IndustrialConveyor.Simulation.Movement
                 initialTargetSpeedMetersPerSecond < 0f)
                 throw new InvalidOperationException("Initial trolley speed must be finite and non-negative.");
 
-            var buildResult = TrackGeometryBuilder.Build(trackConfiguration);
-            if (!buildResult.Report.IsValid || !buildResult.Path.IsClosed)
-                throw new InvalidOperationException(
-                    $"Trolley simulation requires a valid closed track: {string.Join("; ", GetErrors(buildResult.Report))}");
-            trackPath = buildResult.Path;
+            network = TrackSource.ResolveNetwork(trackConfiguration);
+            traffic = new TrolleyTraffic(network, minimumGapMeters);
+            if (!network.IsMainRouteClosed)
+                throw new InvalidOperationException("The main route of the track does not return to its start.");
 
             var suspensions = UnityEngine.Object.FindObjectsByType<TrolleySuspension>(FindObjectsInactive.Exclude);
             Array.Sort(suspensions, CompareInitialPosition);
@@ -171,13 +175,12 @@ namespace IndustrialConveyor.Simulation.Movement
                 trolleys.Add(CreateTrolleyData(i, suspension, suspension.InitialCenterPositionMeters));
             }
 
+            trolleys.Sort(ComparePosition);
             ValidateInitialSpacing();
-            nextPositions = new float[trolleys.Count];
-            nextSpeeds = new float[trolleys.Count];
             IsPaused = simulationConfiguration.StartPaused;
             initialized = true;
-            Debug.Log($"Trolley simulation initialized: {trolleys.Count} drives, {trackPath.TotalLengthMeters:F1} m track, " +
-                      $"target {initialTargetSpeedMetersPerSecond:F2} m/s.", this);
+            Debug.Log($"Trolley simulation initialized: {trolleys.Count} drives, {network.TotalLengthMeters:F1} m track " +
+                      $"({network.Edges.Count} routes, {network.Nodes.Count} switches), target {initialTargetSpeedMetersPerSecond:F2} m/s.", this);
         }
 
         /// <summary>Resizes the active trolley fleet, cloning the configured scene suspension when needed.</summary>
@@ -196,7 +199,7 @@ namespace IndustrialConveyor.Simulation.Movement
             if (count > suspensionPool.Count)
                 maximumBodyLength = Mathf.Max(maximumBodyLength, suspensionPool[0].TrolleyType.BodyLengthMeters);
             var minimumPitch = maximumBodyLength + minimumGapMeters;
-            if (trackPath.TotalLengthMeters / count < minimumPitch)
+            if (network.MainRouteLengthMeters / count < minimumPitch)
                 throw new InvalidOperationException(
                     $"The track cannot fit {count} trolleys with the current body lengths and {minimumGapMeters:F2} m minimum gap.");
 
@@ -224,21 +227,30 @@ namespace IndustrialConveyor.Simulation.Movement
                 if (!active)
                     continue;
 
-                var position = trackPath.TotalLengthMeters * (i + 0.5f) / count;
+                var position = network.MainRouteLengthMeters * (i + 0.5f) / count;
                 suspension.SetInitialCenterPositionMeters(position);
                 trolleys.Add(CreateTrolleyData(i, suspension, position));
             }
 
+            trolleys.Sort(ComparePosition);
             ValidateInitialSpacing();
-            nextPositions = new float[count];
-            nextSpeeds = new float[count];
             SimulationTimeSeconds = 0f;
             accumulatorSeconds = 0f;
             globalEmergencyStop = false;
         }
 
-        /// <summary>Adds a trolley of the selected type at the requested track distance.</summary>
+        /// <summary>Adds a trolley of the selected type at a distance along the main route (the loop on a simple loop).</summary>
         public TrolleyData AddTrolley(TrolleyTypeDefinition trolleyType, float positionMeters)
+        {
+            if (!initialized)
+                Initialize();
+            if (float.IsNaN(positionMeters) || float.IsInfinity(positionMeters))
+                throw new ArgumentOutOfRangeException(nameof(positionMeters));
+            return AddTrolley(trolleyType, network.ResolveMainRoute(positionMeters));
+        }
+
+        /// <summary>Adds a trolley of the selected type at a point of a track edge.</summary>
+        public TrolleyData AddTrolley(TrolleyTypeDefinition trolleyType, TrackLocation location)
         {
             if (!initialized)
                 Initialize();
@@ -248,8 +260,7 @@ namespace IndustrialConveyor.Simulation.Movement
                 throw new ArgumentException(typeError, nameof(trolleyType));
             if (trolleys.Count >= 100)
                 throw new InvalidOperationException("The maximum number of trolleys is 100.");
-            if (float.IsNaN(positionMeters) || float.IsInfinity(positionMeters))
-                throw new ArgumentOutOfRangeException(nameof(positionMeters));
+            location = NormalizeLocation(location);
 
             var template = suspensionPool.Find(suspension => suspension.TrolleyType == trolleyType) ?? suspensionPool[0];
             var clone = Instantiate(template.gameObject, template.transform.parent);
@@ -264,14 +275,12 @@ namespace IndustrialConveyor.Simulation.Movement
             try
             {
                 suspension.SetTrolleyType(trolleyType);
-                var position = trackPath.WrapDistance(positionMeters);
-                suspension.SetInitialCenterPositionMeters(position);
-                var trolley = CreateTrolleyData(ParseTrolleyIndex(GenerateTrolleyId()) - 1, suspension, position);
+                var trolley = CreateTrolleyData(ParseTrolleyIndex(GenerateTrolleyId()) - 1, suspension, location);
                 trolleys.Add(trolley);
                 trolleys.Sort(ComparePosition);
                 ValidateInitialSpacing();
                 suspensionPool.Add(suspension);
-                ResizeDriveBuffers();
+                suspension.UpdateSuspension(trolley.Edge, trolley.SimulationPositionMeters, trolley.Trail);
                 return trolley;
             }
             catch
@@ -283,39 +292,21 @@ namespace IndustrialConveyor.Simulation.Movement
         }
 
         /// <summary>Finds a track position with the greatest clearance for a trolley of the selected type.</summary>
-        public float GetSuggestedTrolleyPositionMeters(TrolleyTypeDefinition trolleyType)
+        public TrackLocation GetSuggestedTrolleyLocation(TrolleyTypeDefinition trolleyType)
         {
             if (trolleyType == null)
                 throw new ArgumentNullException(nameof(trolleyType));
-            if (trolleys.Count == 0)
-                return 0f;
-
-            var sampleCount = Mathf.CeilToInt(trackPath.TotalLengthMeters * 2f);
-            var bestPosition = 0f;
-            var bestClearance = float.NegativeInfinity;
-            for (var sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
-            {
-                var candidatePosition = trackPath.TotalLengthMeters * sampleIndex / sampleCount;
-                var minimumClearance = float.PositiveInfinity;
-                foreach (var existing in trolleys)
-                {
-                    var halfLengthSum = (trolleyType.BodyLengthMeters + existing.TrolleyType.BodyLengthMeters) * 0.5f;
-                    var forwardClearance = Mathf.Repeat(existing.SimulationPositionMeters - candidatePosition,
-                        trackPath.TotalLengthMeters) - halfLengthSum;
-                    var backwardClearance = Mathf.Repeat(candidatePosition - existing.SimulationPositionMeters,
-                        trackPath.TotalLengthMeters) - halfLengthSum;
-                    minimumClearance = Mathf.Min(minimumClearance, forwardClearance, backwardClearance);
-                }
-
-                if (minimumClearance <= bestClearance)
-                    continue;
-                bestClearance = minimumClearance;
-                bestPosition = candidatePosition;
-            }
-
-            if (bestClearance < minimumGapMeters)
+            if (!initialized)
+                Initialize();
+            if (!traffic.TrySuggestLocation(trolleys, trolleyType.BodyLengthMeters, out var location))
                 throw new InvalidOperationException("There is no free position for another trolley on the track.");
-            return bestPosition;
+            return location;
+        }
+
+        /// <summary>Finds a free distance (on its edge) for a trolley of the selected type; see <see cref="GetSuggestedTrolleyLocation"/>.</summary>
+        public float GetSuggestedTrolleyPositionMeters(TrolleyTypeDefinition trolleyType)
+        {
+            return GetSuggestedTrolleyLocation(trolleyType).Meters;
         }
 
         /// <summary>Removes one trolley from the active simulation.</summary>
@@ -328,23 +319,33 @@ namespace IndustrialConveyor.Simulation.Movement
             trolleys.Remove(trolley);
             suspensionPool.Remove(trolley.Suspension);
             DestroyTrolleyObject(trolley.Suspension.gameObject);
-            ResizeDriveBuffers();
         }
 
-        /// <summary>Moves one trolley to a track distance and stops it, rejecting overlapping positions.</summary>
+        /// <summary>Moves one trolley to a distance on its current edge and stops it, rejecting overlapping positions.</summary>
         public void MoveTrolleyToPosition(string trolleyId, float positionMeters)
         {
             if (float.IsNaN(positionMeters) || float.IsInfinity(positionMeters))
                 throw new ArgumentOutOfRangeException(nameof(positionMeters));
+            MoveTrolleyToLocation(trolleyId, new TrackLocation(RequireTrolley(trolleyId).Edge, positionMeters));
+        }
 
+        /// <summary>Moves one trolley to a point of a track edge and stops it, rejecting overlapping positions.</summary>
+        public void MoveTrolleyToLocation(string trolleyId, TrackLocation location)
+        {
             var trolley = RequireTrolley(trolleyId);
+            location = NormalizeLocation(location);
+            var previousEdge = trolley.Edge;
             var previousPosition = trolley.SimulationPositionMeters;
+            var previousTrail = new List<TrackEdge>(trolley.Trail);
             var previousSpeed = trolley.ActualSpeedMetersPerSecond;
             var previousTargetSpeed = trolley.TargetSpeedMetersPerSecond;
-            trolley.SimulationPositionMeters = trackPath.WrapDistance(positionMeters);
+            var previousInitialEdge = trolley.InitialEdge;
+            var previousInitialPosition = trolley.InitialPositionMeters;
+            trolley.Place(location.Edge, location.Meters);
             trolley.ActualSpeedMetersPerSecond = 0f;
             trolley.TargetSpeedMetersPerSecond = 0f;
-            trolley.InitialPositionMeters = trolley.SimulationPositionMeters;
+            trolley.InitialEdge = location.Edge;
+            trolley.InitialPositionMeters = location.Meters;
             trolleys.Sort(ComparePosition);
 
             try
@@ -353,16 +354,84 @@ namespace IndustrialConveyor.Simulation.Movement
             }
             catch
             {
-                trolley.SimulationPositionMeters = previousPosition;
+                trolley.Place(previousEdge, previousPosition);
+                trolley.Trail.AddRange(previousTrail);
                 trolley.ActualSpeedMetersPerSecond = previousSpeed;
                 trolley.TargetSpeedMetersPerSecond = previousTargetSpeed;
-                trolley.InitialPositionMeters = previousPosition;
+                trolley.InitialEdge = previousInitialEdge;
+                trolley.InitialPositionMeters = previousInitialPosition;
                 trolleys.Sort(ComparePosition);
                 throw;
             }
 
-            trolley.Suspension.SetInitialCenterPositionMeters(trolley.SimulationPositionMeters);
+            trolley.Suspension.UpdateSuspension(trolley.Edge, trolley.SimulationPositionMeters, trolley.Trail);
             UpdateState(trolley);
+        }
+
+        /// <summary>
+        /// Gets the trolley's position as a barcode value (mm): the code strip value under its barcode reader, or -1 when the
+        /// track there has no strip. The reader sits <c>BarcodeReaderMountingPositionMeters.z</c> ahead of the trolley center.
+        /// On a track without code strips the value is the distance along the track in mm.
+        /// </summary>
+        public int GetBarcode(TrolleyData trolley)
+        {
+            if (!initialized)
+                Initialize();
+            return GetBarcodeForCenter(trolley.TrolleyType, new TrackLocation(trolley.Edge, trolley.SimulationPositionMeters),
+                trolley.Trail);
+        }
+
+        /// <summary>Gets the barcode value a trolley of the given type would read with its center at <paramref name="center"/>.</summary>
+        public int GetBarcodeForCenter(TrolleyTypeDefinition trolleyType, TrackLocation center, IReadOnlyList<TrackEdge> trail = null)
+        {
+            if (!initialized)
+                Initialize();
+            var reader = network.ResolveOffset(center.Edge, center.Meters, trolleyType.BarcodeReaderMountingPositionMeters.z, trail);
+            return network.GetBarcode(reader);
+        }
+
+        /// <summary>Finds the center location at which a trolley of the given type reads the barcode in <paramref name="text"/>.</summary>
+        public bool TryResolveCenterFromBarcode(TrolleyTypeDefinition trolleyType, string text, out TrackLocation center,
+            out string error)
+        {
+            if (!initialized)
+                Initialize();
+            if (!network.TryFindBarcode(text, out var reader, out error))
+            {
+                center = reader;
+                return false;
+            }
+            center = network.ResolveOffset(reader.Edge, reader.Meters, -trolleyType.BarcodeReaderMountingPositionMeters.z, null);
+            return true;
+        }
+
+        /// <summary>Gets the splits of the network (the switches whose state is sent over UDP).</summary>
+        public IEnumerable<TrackNode> GetSwitches()
+        {
+            if (!initialized)
+                Initialize();
+            foreach (var node in network.Nodes)
+            {
+                if (node.Kind == TrackNodeKind.Split)
+                    yield return node;
+            }
+        }
+
+        /// <summary>
+        /// Requests a switch position by switch name. Split: outgoing index (0 = Q0 branch, 1 = Q1 straight).
+        /// Merge: incoming index that is held open, or -1 for automatic right of way.
+        /// </summary>
+        public void SetSwitchState(string switchName, int state)
+        {
+            if (!initialized)
+                Initialize();
+            var node = network.FindNode(switchName);
+            if (node == null)
+                throw new ArgumentException($"Switch '{switchName}' was not found.", nameof(switchName));
+            if (node.Kind == TrackNodeKind.Split)
+                node.RequestOutIndex(state);
+            else
+                node.RequestInIndex(state);
         }
 
         /// <summary>Advances every drive exactly one supplied deterministic simulation step.</summary>
@@ -373,56 +442,14 @@ namespace IndustrialConveyor.Simulation.Movement
             if (float.IsNaN(deltaTimeSeconds) || float.IsInfinity(deltaTimeSeconds) || deltaTimeSeconds <= 0f)
                 throw new ArgumentOutOfRangeException(nameof(deltaTimeSeconds));
 
-            var count = trolleys.Count;
-            if (count == 0)
+            if (trolleys.Count == 0)
                 return;
 
-            trolleys.Sort(ComparePosition);
-            for (var i = 0; i < count; i++)
-            {
-                var trolley = trolleys[i];
-                var leader = count > 1 ? trolleys[(i + 1) % count] : null;
-                var targetSpeed = globalEmergencyStop || trolley.IsEmergencyStopped || trolley.IsDriveFaulted
-                    ? 0f
-                    : trolley.TargetSpeedMetersPerSecond;
-
-                if (leader != null)
-                {
-                    var clearance = TrolleyDriveModel.CalculateAvailableClearance(
-                        trolley.SimulationPositionMeters,
-                        trolley.TrolleyType.BodyLengthMeters,
-                        leader.SimulationPositionMeters,
-                        leader.TrolleyType.BodyLengthMeters,
-                        trackPath.TotalLengthMeters,
-                        minimumGapMeters);
-                    var safeSpeed = TrolleyDriveModel.CalculateMaximumSafeSpeed(
-                        leader.ActualSpeedMetersPerSecond,
-                        trolley.DecelerationMetersPerSecondSquared,
-                        Mathf.Max(0f, clearance));
-                    targetSpeed = Mathf.Min(targetSpeed, safeSpeed);
-                }
-
-                var nextSpeed = TrolleyDriveModel.AdvanceSpeed(
-                    trolley.ActualSpeedMetersPerSecond,
-                    targetSpeed,
-                    trolley.TrolleyType.MaximumSpeedMetersPerSecond,
-                    trolley.AccelerationMetersPerSecondSquared,
-                    trolley.DecelerationMetersPerSecondSquared,
-                    deltaTimeSeconds);
-                var distance = (trolley.ActualSpeedMetersPerSecond + nextSpeed) * 0.5f * deltaTimeSeconds;
-                nextSpeeds[i] = nextSpeed;
-                nextPositions[i] = trackPath.WrapDistance(trolley.SimulationPositionMeters + distance);
-            }
-
-            EnforceSpacingAfterStep(count);
-
-            for (var i = 0; i < count; i++)
-            {
-                var trolley = trolleys[i];
-                trolley.SimulationPositionMeters = nextPositions[i];
-                trolley.ActualSpeedMetersPerSecond = nextSpeeds[i];
+            traffic.MinimumGapMeters = minimumGapMeters;
+            traffic.Step(trolleys, deltaTimeSeconds, globalEmergencyStop);
+            foreach (var trolley in trolleys)
                 UpdateState(trolley);
-            }
+            trolleys.Sort(ComparePosition);
 
             SimulationTimeSeconds += deltaTimeSeconds;
         }
@@ -515,9 +542,11 @@ namespace IndustrialConveyor.Simulation.Movement
             if (!initialized)
                 Initialize();
 
+            network.ResetSwitches();
+            traffic = new TrolleyTraffic(network, minimumGapMeters);
             foreach (var trolley in trolleys)
             {
-                trolley.SimulationPositionMeters = trolley.InitialPositionMeters;
+                trolley.Place(trolley.InitialEdge, trolley.InitialPositionMeters);
                 trolley.ActualSpeedMetersPerSecond = 0f;
                 trolley.TargetSpeedMetersPerSecond = startMovingOnPlay
                     ? Mathf.Min(initialTargetSpeedMetersPerSecond, trolley.TrolleyType.MaximumSpeedMetersPerSecond)
@@ -528,6 +557,7 @@ namespace IndustrialConveyor.Simulation.Movement
                 UpdateState(trolley);
             }
 
+            trolleys.Sort(ComparePosition);
             globalEmergencyStop = false;
             SimulationTimeSeconds = 0f;
             accumulatorSeconds = 0f;
@@ -535,45 +565,20 @@ namespace IndustrialConveyor.Simulation.Movement
 
         private void ValidateInitialSpacing()
         {
-            if (trolleys.Count < 2)
-                return;
-
-            for (var i = 0; i < trolleys.Count; i++)
-            {
-                var follower = trolleys[i];
-                var leader = trolleys[(i + 1) % trolleys.Count];
-                var clearance = TrolleyDriveModel.CalculateAvailableClearance(
-                    follower.SimulationPositionMeters,
-                    follower.TrolleyType.BodyLengthMeters,
-                    leader.SimulationPositionMeters,
-                    leader.TrolleyType.BodyLengthMeters,
-                    trackPath.TotalLengthMeters,
-                    minimumGapMeters);
-                if (clearance < 0f)
-                    throw new InvalidOperationException(
-                        $"Initial trolley spacing overlaps {follower.TrolleyId} and {leader.TrolleyId} by {-clearance:F3} m.");
-            }
+            traffic.MinimumGapMeters = minimumGapMeters;
+            if (traffic.TryFindOverlap(trolleys, out var description))
+                throw new InvalidOperationException(description);
         }
 
-        private void EnforceSpacingAfterStep(int count)
+        private TrackLocation NormalizeLocation(TrackLocation location)
         {
-            if (count < 2)
-                return;
-
-            for (var i = count - 1; i >= 0; i--)
-            {
-                var leaderIndex = (i + 1) % count;
-                var follower = trolleys[i];
-                var leader = trolleys[leaderIndex];
-                var requiredCenterDistance =
-                    (follower.TrolleyType.BodyLengthMeters + leader.TrolleyType.BodyLengthMeters) * 0.5f + minimumGapMeters;
-                var actualCenterDistance = Mathf.Repeat(nextPositions[leaderIndex] - nextPositions[i], trackPath.TotalLengthMeters);
-                if (actualCenterDistance + 0.0001f >= requiredCenterDistance)
-                    continue;
-
-                nextPositions[i] = trackPath.WrapDistance(nextPositions[leaderIndex] - requiredCenterDistance);
-                nextSpeeds[i] = Mathf.Min(nextSpeeds[i], nextSpeeds[leaderIndex]);
-            }
+            var edge = location.Edge ?? network.Edges[0];
+            if (float.IsNaN(location.Meters) || float.IsInfinity(location.Meters))
+                throw new ArgumentOutOfRangeException(nameof(location));
+            var meters = edge.IsRing
+                ? Mathf.Repeat(location.Meters, edge.LengthMeters)
+                : Mathf.Clamp(location.Meters, 0f, edge.LengthMeters);
+            return new TrackLocation(edge, meters);
         }
 
         private void UpdateState(TrolleyData trolley)
@@ -608,13 +613,17 @@ namespace IndustrialConveyor.Simulation.Movement
             }
         }
 
-        private TrolleyData CreateTrolleyData(int index, TrolleySuspension suspension, float position)
+        private TrolleyData CreateTrolleyData(int index, TrolleySuspension suspension, float mainRoutePosition)
         {
-            var wrappedPosition = trackPath.WrapDistance(position);
+            return CreateTrolleyData(index, suspension, network.ResolveMainRoute(mainRoutePosition));
+        }
+
+        private TrolleyData CreateTrolleyData(int index, TrolleySuspension suspension, TrackLocation location)
+        {
             var targetSpeed = startMovingOnPlay
                 ? Mathf.Min(initialTargetSpeedMetersPerSecond, suspension.TrolleyType.MaximumSpeedMetersPerSecond)
                 : 0f;
-            return new TrolleyData($"T-{index + 1:000}", suspension, wrappedPosition, targetSpeed);
+            return new TrolleyData($"T-{index + 1:000}", suspension, location.Edge, location.Meters, targetSpeed);
         }
 
         private string GenerateTrolleyId()
@@ -631,12 +640,6 @@ namespace IndustrialConveyor.Simulation.Movement
         private static int ParseTrolleyIndex(string trolleyId)
         {
             return int.Parse(trolleyId.Substring(2));
-        }
-
-        private void ResizeDriveBuffers()
-        {
-            nextPositions = new float[trolleys.Count];
-            nextSpeeds = new float[trolleys.Count];
         }
 
         private static void DestroyTrolleyObject(GameObject trolleyObject)
@@ -662,18 +665,8 @@ namespace IndustrialConveyor.Simulation.Movement
 
         private static int ComparePosition(TrolleyData left, TrolleyData right)
         {
-            return left.SimulationPositionMeters.CompareTo(right.SimulationPositionMeters);
-        }
-
-        private static string[] GetErrors(TrackValidationReport report)
-        {
-            var messages = new List<string>();
-            foreach (var issue in report.Issues)
-            {
-                if (issue.Severity == TrackIssueSeverity.Error)
-                    messages.Add(issue.Message);
-            }
-            return messages.ToArray();
+            var byEdge = left.Edge.Index.CompareTo(right.Edge.Index);
+            return byEdge != 0 ? byEdge : left.SimulationPositionMeters.CompareTo(right.SimulationPositionMeters);
         }
     }
 }

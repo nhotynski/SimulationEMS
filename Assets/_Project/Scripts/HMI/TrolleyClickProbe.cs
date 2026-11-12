@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using IndustrialConveyor.Simulation.Communication;
 using IndustrialConveyor.Simulation.Movement;
+using IndustrialConveyor.Simulation.Track;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace IndustrialConveyor.Simulation.HMI
 {
@@ -12,6 +14,7 @@ namespace IndustrialConveyor.Simulation.HMI
     {
         private const int WindowId = 638214;
         private const int UdpWindowId = 638215;
+        private const int TrackWindowId = 638216;
         private readonly Dictionary<string, string> targetInputs = new Dictionary<string, string>();
         private readonly Dictionary<string, string> positionInputs = new Dictionary<string, string>();
 
@@ -35,6 +38,11 @@ namespace IndustrialConveyor.Simulation.HMI
         private string udpPortInput;
         private string udpIntervalInput;
         private string udpError;
+        private bool trackExpanded;
+        private Rect trackWindowRect;
+        private string trackPathInput;
+        private string trackError;
+        private List<TrackNode> switchNodes;
         private GUIStyle windowStyle;
         private GUIStyle rowStyle;
         private GUIStyle headingStyle;
@@ -60,6 +68,8 @@ namespace IndustrialConveyor.Simulation.HMI
             }
 
             udpSender = GetComponent<UdpPositionSender>();
+            if (GetComponent<TrackSwitchIndicators>() == null)
+                gameObject.AddComponent<TrackSwitchIndicators>();
             if (udpSender == null)
                 udpSender = gameObject.AddComponent<UdpPositionSender>();
             udpSettings = UdpSettings.Load();
@@ -91,6 +101,24 @@ namespace IndustrialConveyor.Simulation.HMI
             GUI.color = previousColor;
             if (udpClicked)
                 udpExpanded = !udpExpanded;
+
+            GUI.color = new Color(0.08f, 0.72f, 0.76f, 1f);
+            var trackClicked = GUI.Button(new Rect(Screen.width - 594f, 12f, 186f, 36f),
+                trackExpanded ? "TRACK FILE  [ - ]" : "TRACK FILE  [ + ]", buttonStyle);
+            GUI.color = previousColor;
+            if (trackClicked)
+            {
+                trackExpanded = !trackExpanded;
+                if (trackPathInput == null)
+                    trackPathInput = TrackSource.SavedFilePath;
+            }
+            if (trackExpanded)
+            {
+                if (trackWindowRect.width <= 0f)
+                    trackWindowRect = new Rect(12f, 56f, Mathf.Min(680f, Screen.width - 24f),
+                        Mathf.Min(430f, Screen.height - 64f));
+                trackWindowRect = GUI.Window(TrackWindowId, trackWindowRect, DrawTrackWindow, GUIContent.none, windowStyle);
+            }
             if (udpExpanded)
             {
                 if (udpWindowRect.width <= 0f)
@@ -145,8 +173,8 @@ namespace IndustrialConveyor.Simulation.HMI
             GUILayout.BeginHorizontal();
             Header("ID", 50f);
             Header("TYPE", 90f);
-            Header("ACTUAL POS mm", 104f);
-            Header("MOVE TO mm", 104f);
+            Header("POSITION (barcode)", 130f);
+            Header("MOVE TO (barcode)", 130f);
             Header("", 56f);
             Header("ACTUAL mm/s", 82f);
             Header("TARGET mm/s", 90f);
@@ -224,6 +252,146 @@ namespace IndustrialConveyor.Simulation.HMI
             GUI.DragWindow(new Rect(0f, 0f, udpWindowRect.width - 100f, 24f));
         }
 
+        private void DrawTrackWindow(int id)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("TRACK FILE", headingStyle);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("COLLAPSE", buttonStyle, GUILayout.Width(82f), GUILayout.Height(28f)))
+                trackExpanded = false;
+            GUILayout.EndHorizontal();
+
+            var length = simulationManager.Network != null ? simulationManager.Network.TotalLengthMeters : 0f;
+            GUILayout.Label(string.IsNullOrEmpty(TrackSource.LoadedFilePath)
+                ? $"ACTIVE TRACK: scene asset  |  {length:F1} m"
+                : $"ACTIVE TRACK: {TrackSource.LoadedFilePath}  |  {length:F1} m", statusStyle);
+            var error = trackError ?? TrackSource.LastError;
+            if (!string.IsNullOrEmpty(error))
+                GUILayout.Label(error, errorStyle);
+            GUILayout.Space(6f);
+
+            GUILayout.Label("WORKBOOK (.xlsm / .xlsx) - sheets 'Parameters' and 'Segments'", statusStyle);
+            trackPathInput = GUILayout.TextField(trackPathInput ?? string.Empty, fieldStyle);
+            GUILayout.Space(6f);
+
+            GUILayout.BeginHorizontal();
+            if (NativeFileDialog.IsSupported &&
+                GUILayout.Button("BROWSE...", buttonStyle, GUILayout.Width(110f), GUILayout.Height(30f)))
+            {
+                var picked = NativeFileDialog.PickTrackFile(trackPathInput);
+                if (!string.IsNullOrEmpty(picked))
+                    trackPathInput = picked;
+            }
+            if (GUILayout.Button("LOAD TRACK", buttonStyle, GUILayout.Width(130f), GUILayout.Height(30f)))
+                ApplyTrackFile(trackPathInput);
+            if (GUILayout.Button("USE SCENE TRACK", buttonStyle, GUILayout.Width(160f), GUILayout.Height(30f)))
+            {
+                TrackSource.ClearSelection();
+                trackError = null;
+                ReloadScene();
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Space(6f);
+            GUILayout.Label("Loading restarts the simulation on the new track (trolleys return to their scene positions; " +
+                            "restart UDP afterwards). The file is remembered for the next start.", statusStyle);
+
+            DrawSwitchControls();
+
+            GUI.DragWindow(new Rect(0f, 0f, trackWindowRect.width - 100f, 24f));
+        }
+
+        private void DrawSwitchControls()
+        {
+            if (switchNodes == null)
+                switchNodes = new List<TrackNode>(simulationManager.Network.Nodes);
+            if (switchNodes.Count == 0)
+                return;
+
+            GUILayout.Space(8f);
+            GUILayout.Label("SWITCHES", headingStyle);
+            GUILayout.Label("Split: choose the exit. Merge: AUTO, or hold one input open (the other waits). A change waits until the switch is free.",
+                statusStyle);
+            var previousColor = GUI.color;
+            foreach (var node in switchNodes)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label(node.Name, labelStyle, GUILayout.Width(56f));
+                if (node.Kind == TrackNodeKind.Split)
+                {
+                    for (var index = 0; index < node.OutEdges.Count; index++)
+                    {
+                        var selected = node.SelectedOutIndex == index;
+                        var pending = node.RequestedOutIndex == index;
+                        var label = node.OutLabels.Count > index ? node.OutLabels[index] : "Q" + index;
+                        if (SwitchButton($"{label} > {node.OutEdges[index].Name}", selected, pending))
+                            ApplySwitch(node, index);
+                    }
+                    GUI.color = previousColor;
+                    GUILayout.Label(node.IsLocked ? "LOCKED" : node.RequestedOutIndex >= 0 ? "pending" : string.Empty, statusStyle);
+                }
+                else
+                {
+                    if (SwitchButton("AUTO", node.ManualInIndex < 0, node.RequestedInIndex == -1))
+                        ApplySwitch(node, -1);
+                    for (var index = 0; index < node.InEdges.Count; index++)
+                    {
+                        if (SwitchButton($"only from {node.InEdges[index].Name}", node.ManualInIndex == index,
+                                node.RequestedInIndex == index))
+                            ApplySwitch(node, index);
+                    }
+                    GUI.color = previousColor;
+                    GUILayout.Label(node.HasPendingInput ? "pending" : string.Empty, statusStyle);
+                }
+                GUILayout.EndHorizontal();
+            }
+            GUI.color = previousColor;
+        }
+
+        private bool SwitchButton(string label, bool selected, bool pending)
+        {
+            var previous = GUI.color;
+            GUI.color = selected ? new Color(0.45f, 0.95f, 0.55f) : pending ? new Color(1f, 0.78f, 0.3f) : Color.white;
+            var clicked = GUILayout.Button(label, buttonStyle, GUILayout.Width(150f), GUILayout.Height(26f));
+            GUI.color = previous;
+            return clicked;
+        }
+
+        private void ApplySwitch(TrackNode node, int state)
+        {
+            try
+            {
+                simulationManager.SetSwitchState(node.Name, state);
+                panelError = null;
+            }
+            catch (Exception exception)
+            {
+                panelError = exception.Message;
+            }
+        }
+
+        private void ApplyTrackFile(string path)
+        {
+            if (!TrackSource.TrySelect(path, out var error))
+            {
+                trackError = error;
+                return;
+            }
+
+            trackError = null;
+            ReloadScene();
+        }
+
+        private void ReloadScene()
+        {
+            var scene = SceneManager.GetActiveScene();
+            if (scene.buildIndex < 0)
+            {
+                trackError = "The active scene is not in Build Profiles, so it cannot be reloaded.";
+                return;
+            }
+            SceneManager.LoadScene(scene.buildIndex);
+        }
+
         private void DrawUdpField(string label, ref string value)
         {
             GUILayout.BeginHorizontal();
@@ -287,7 +455,7 @@ namespace IndustrialConveyor.Simulation.HMI
             GUILayout.EndHorizontal();
 
             GUILayout.BeginHorizontal();
-            GUILayout.Label("POSITION mm", statusStyle, GUILayout.Width(112f));
+            GUILayout.Label("POSITION (barcode)", statusStyle, GUILayout.Width(112f));
             if ((string.IsNullOrEmpty(addPositionInput) || selectedTypeIndex != previousTypeIndex) &&
                 availableTypes[selectedTypeIndex] != null)
                 RefreshSuggestedPosition(availableTypes[selectedTypeIndex]);
@@ -301,8 +469,9 @@ namespace IndustrialConveyor.Simulation.HMI
         {
             try
             {
-                addPositionInput = (simulationManager.GetSuggestedTrolleyPositionMeters(trolleyType) * 1000f)
-                    .ToString("F0", CultureInfo.InvariantCulture);
+                var location = simulationManager.GetSuggestedTrolleyLocation(trolleyType);
+                var suggested = simulationManager.GetBarcodeForCenter(trolleyType, location);
+                addPositionInput = suggested >= 0 ? suggested.ToString(CultureInfo.InvariantCulture) : string.Empty;
                 panelError = null;
             }
             catch (Exception exception)
@@ -318,17 +487,23 @@ namespace IndustrialConveyor.Simulation.HMI
             GUILayout.BeginHorizontal();
             GUILayout.Label(trolley.TrolleyId, labelStyle, GUILayout.Width(50f));
             GUILayout.Label(trolley.TrolleyType.DisplayName, labelStyle, GUILayout.Width(90f));
-            GUILayout.Label($"{trolley.SimulationPositionMeters * 1000f:F0}", labelStyle, GUILayout.Width(104f));
+            GUILayout.Label(simulationManager.GetBarcode(trolley) >= 0
+                    ? simulationManager.GetBarcode(trolley).ToString(CultureInfo.InvariantCulture) : "-",
+                labelStyle, GUILayout.Width(130f));
             if (!positionInputs.TryGetValue(trolley.TrolleyId, out var positionInput))
-                positionInput = (trolley.SimulationPositionMeters * 1000f).ToString("F0", CultureInfo.InvariantCulture);
-            positionInputs[trolley.TrolleyId] = GUILayout.TextField(positionInput, fieldStyle, GUILayout.Width(104f));
+            {
+                var current = simulationManager.GetBarcode(trolley);
+                positionInput = current >= 0 ? current.ToString(CultureInfo.InvariantCulture) : string.Empty;
+            }
+            positionInputs[trolley.TrolleyId] = GUILayout.TextField(positionInput, fieldStyle, GUILayout.Width(130f));
             if (GUILayout.Button("MOVE", buttonStyle, GUILayout.Width(56f)))
             {
-                if (TryParseFloat(positionInputs[trolley.TrolleyId], out var positionMillimeters))
+                if (simulationManager.TryResolveCenterFromBarcode(trolley.TrolleyType, positionInputs[trolley.TrolleyId],
+                        out var target, out var parseError))
                 {
                     try
                     {
-                        simulationManager.MoveTrolleyToPosition(trolley.TrolleyId, positionMillimeters * 0.001f);
+                        simulationManager.MoveTrolleyToLocation(trolley.TrolleyId, target);
                         panelError = null;
                     }
                     catch (Exception exception)
@@ -338,7 +513,7 @@ namespace IndustrialConveyor.Simulation.HMI
                 }
                 else
                 {
-                    panelError = "Enter a valid position in millimeters.";
+                    panelError = parseError;
                 }
                 GUILayout.EndHorizontal();
                 GUILayout.EndVertical();
@@ -402,23 +577,23 @@ namespace IndustrialConveyor.Simulation.HMI
                 panelError = "Select a valid trolley type.";
                 return;
             }
-            if (!TryParseFloat(addPositionInput, out var positionMillimeters))
+            if (!simulationManager.TryResolveCenterFromBarcode(trolleyType, addPositionInput, out var center, out var parseError))
             {
-                panelError = "Enter a valid position in millimeters.";
+                panelError = parseError;
                 return;
             }
 
             try
             {
-                var trolley = simulationManager.AddTrolley(trolleyType, positionMillimeters * 0.001f);
-                positionInputs[trolley.TrolleyId] = (trolley.SimulationPositionMeters * 1000f)
-                    .ToString("F0", CultureInfo.InvariantCulture);
+                var trolley = simulationManager.AddTrolley(trolleyType, center);
+                var barcode = simulationManager.GetBarcode(trolley);
+                var where = barcode >= 0 ? barcode.ToString(CultureInfo.InvariantCulture) : "-";
+                positionInputs[trolley.TrolleyId] = where;
                 targetInputs[trolley.TrolleyId] = (trolley.TargetSpeedMetersPerSecond * 1000f)
                     .ToString("F0", CultureInfo.InvariantCulture);
-                addPositionInput = (simulationManager.GetSuggestedTrolleyPositionMeters(trolleyType) * 1000f)
-                    .ToString("F0", CultureInfo.InvariantCulture);
+                RefreshSuggestedPosition(trolleyType);
                 scrollPosition.y = float.MaxValue;
-                panelMessage = $"Added {trolley.TrolleyId} ({trolley.TrolleyType.DisplayName}) at {trolley.SimulationPositionMeters * 1000f:F0} mm.";
+                panelMessage = $"Added {trolley.TrolleyId} ({trolley.TrolleyType.DisplayName}) at barcode {where}.";
                 panelError = null;
                 Debug.Log(panelMessage, this);
             }
@@ -545,7 +720,7 @@ namespace IndustrialConveyor.Simulation.HMI
         private static string GetStateText(TrolleyData trolley)
         {
             var error = string.IsNullOrEmpty(trolley.ErrorState) ? string.Empty : $"  |  {trolley.ErrorState}";
-            return $"{trolley.OperatingState}  |  Drive {trolley.DriveState}  |  Limit {trolley.TrolleyType.MaximumSpeedMetersPerSecond * 1000f:F0} mm/s{error}";
+            return $"{trolley.OperatingState}  |  Drive {trolley.DriveState}  |  Route {trolley.Edge.Name}  |  Limit {trolley.TrolleyType.MaximumSpeedMetersPerSecond * 1000f:F0} mm/s{error}";
         }
     }
 }

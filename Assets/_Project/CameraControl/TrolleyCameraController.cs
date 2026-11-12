@@ -1,3 +1,5 @@
+using IndustrialConveyor.Simulation.Movement;
+using IndustrialConveyor.Simulation.Track;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
@@ -6,12 +8,13 @@ namespace IndustrialConveyor.Simulation.CameraControl
     /// <summary>Provides WASD camera movement and right-mouse-drag look controls.</summary>
     public sealed class TrolleyCameraController : MonoBehaviour
     {
+        private const float MinimumOrthographicSize = 1.5f;
+        private const float MaximumOrthographicSize = 600f;
+
         [SerializeField, Min(0.1f)] private float moveSpeedMetersPerSecond = 25f;
         [SerializeField, Min(0.1f)] private float fastMoveSpeedMetersPerSecond = 75f;
         [SerializeField, Min(0.01f)] private float mouseSensitivity = 0.12f;
         [SerializeField, Min(0.01f)] private float zoomSensitivity = 0.22f;
-        [SerializeField, Min(1f)] private float minimumOrthographicSize = 20f;
-        [SerializeField, Min(1f)] private float maximumOrthographicSize = 240f;
         [SerializeField, Range(1f, 89f)] private float maximumPitchDegrees = 85f;
 
         private Camera controlledCamera;
@@ -33,6 +36,26 @@ namespace IndustrialConveyor.Simulation.CameraControl
             var angles = transform.eulerAngles;
             yawDegrees = angles.y;
             pitchDegrees = NormalizePitch(angles.x);
+        }
+
+        private void Start()
+        {
+            // A track loaded from a file has its own extents, so start with the whole network in view.
+            if (string.IsNullOrEmpty(TrackSource.LoadedFilePath) || controlledCamera == null || !controlledCamera.orthographic)
+                return;
+            var manager = FindAnyObjectByType<TrolleySimulationManager>();
+            if (manager == null || manager.Network == null)
+                return;
+
+            var network = manager.Network;
+            var minimum = network.BoundsMinimum;
+            var maximum = network.BoundsMaximum;
+            var target = new Vector3((minimum.x + maximum.x) * 0.5f, 8f, (minimum.z + maximum.z) * 0.5f);
+            transform.position = target - transform.forward * 100f;
+            var halfWidth = (maximum.x - minimum.x) * 0.5f;
+            var halfDepth = (maximum.z - minimum.z) * 0.5f;
+            var size = Mathf.Max(halfWidth / Mathf.Max(0.1f, controlledCamera.aspect), halfDepth) * 1.15f;
+            controlledCamera.orthographicSize = Mathf.Clamp(size, MinimumOrthographicSize, MaximumOrthographicSize);
         }
 
         private void Update()
@@ -121,8 +144,8 @@ namespace IndustrialConveyor.Simulation.CameraControl
             var notches = Mathf.Clamp(scroll / 120f, -1f, 1f);
             controlledCamera.orthographicSize = Mathf.Clamp(
                 controlledCamera.orthographicSize * Mathf.Exp(-notches * zoomSensitivity),
-                minimumOrthographicSize,
-                maximumOrthographicSize);
+                MinimumOrthographicSize,
+                MaximumOrthographicSize);
         }
 
         private void EndLook()
